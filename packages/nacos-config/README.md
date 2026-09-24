@@ -124,4 +124,21 @@ NacosConfigClient 的 options 定义见 [ClientOptions](https://github.com/nacos
 
 ## Contacts
 
+### Aliyun MSE KMS encryption
+
+Install `@alicloud/kms20160120` to use the built-in public-gateway KMS client,
+then configure `kmsRegionId` and optionally `kmsKeyId`. Data IDs prefixed with
+`cipher-kms-aes-128-` or `cipher-kms-aes-256-` are encrypted transparently on
+publish and decrypted on get/subscribe. A ClientKey/DKMS implementation can
+be supplied through `kmsClient` with `encrypt`, `decrypt`, and `generateDataKey`
+methods. The `cipher-` prefix uses direct KMS Encrypt/Decrypt.
+
+### Local failover and snapshots
+
+Snapshots are written atomically under `cacheDir/snapshot`. If the server is
+temporarily unavailable, the last ciphertext snapshot is used and decrypted in
+memory. A user-maintained failover file at the matching path under
+`cacheDir/failover` takes precedence over the server and snapshot; subscribed
+keys detect file creation, updates, and deletion while the client is running.
+
 * [@Harry Chen](https://github.com/czy88840616)
