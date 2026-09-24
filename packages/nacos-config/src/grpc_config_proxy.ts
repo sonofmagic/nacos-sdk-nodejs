@@ -20,19 +20,18 @@ const Base = require('sdk-base');
 /* tslint:enable:no-var-requires */
 
 import { GrpcTransportClient } from 'nacos-common';
+import { ConfigCipher } from './cipher';
+
+export interface ConfigQueryResult {
+  content: string | null;
+  encryptedDataKey?: string;
+}
 
 interface ListenContext {
   dataId: string;
   group: string;
   tenant: string;
   md5: string;
-}
-
-/** Raw config content plus the KMS-encrypted data key carried by ConfigQueryResponse. */
-export interface ConfigQueryResult {
-  /** null 表示服务端确认配置不存在（errorCode 300），空串表示存在但内容为空。 */
-  content: string | null;
-  encryptedDataKey?: string;
 }
 
 /**
@@ -45,13 +44,15 @@ export class GrpcConfigProxy extends Base {
   private _logger: any;
   /** key: `${dataId}@@${group}@@${tenant}` → ListenContext */
   private _listenContexts: Map<string, ListenContext>;
+  private _cipher: ConfigCipher | undefined;
 
-  constructor(options: { transportClient: GrpcTransportClient; namespace?: string; logger: any }) {
+  constructor(options: { transportClient: GrpcTransportClient; namespace?: string; logger: any; cipher?: ConfigCipher }) {
     super({ logger: options.logger });
     this._transportClient = options.transportClient;
     this._namespace = options.namespace || 'public';
     this._logger = options.logger;
     this._listenContexts = new Map();
+    this._cipher = options.cipher;
 
     // Register server push handler for config change notifications
     this._transportClient.registerServerPushHandler(
@@ -111,9 +112,8 @@ export class GrpcConfigProxy extends Base {
 
   /**
    * Get config value via gRPC ConfigQueryRequest.
-   * Returns the raw (still encrypted) content plus encryptedDataKey; decryption happens at the caller boundary.
    */
-  async getConfig(dataId: string, group: string, tenant?: string): Promise<ConfigQueryResult> {
+  async getConfigRaw(dataId: string, group: string, tenant?: string): Promise<ConfigQueryResult> {
     const resolvedTenant = tenant != null ? tenant : this._namespace;
     this._logger.info('[GrpcConfigProxy] getConfig dataId=%s group=%s tenant=%s', dataId, group, resolvedTenant);
     const request = {
@@ -122,14 +122,12 @@ export class GrpcConfigProxy extends Base {
       tenant: resolvedTenant,
     };
     const response = await this._transportClient.request(request, 'ConfigQueryRequest');
-    // 业务语义判定（对齐 Java ConfigQueryResponse）：
-    // - resultCode===200：成功，返回内容（允许空串）与 encryptedDataKey；
-    // - errorCode===300（CONFIG_NOT_FOUND）：服务端确认配置不存在，返回 content=null；
-    // - 其余（400 冲突 / 500 内部错误等）：抛出错误并保留 resultCode/errorCode/message 便于诊断。
-    if (response && response.resultCode === 200) {
+    if (response && (response.resultCode === 200 ||
+      (response.resultCode === undefined && response.content !== undefined))) {
       return {
         content: response.content != null ? response.content : '',
-        encryptedDataKey: response.encryptedDataKey || undefined,
+        encryptedDataKey: response.encryptedDataKey ||
+          (response.additionMap && response.additionMap.encryptedDataKey) || undefined,
       };
     }
     const errorCode = response ? response.errorCode : undefined;
@@ -148,11 +146,17 @@ export class GrpcConfigProxy extends Base {
     throw err;
   }
 
+  async getConfig(dataId: string, group: string, tenant?: string): Promise<string | null> {
+    const result = await this.getConfigRaw(dataId, group, tenant);
+    if (result.content === null) return null;
+    if (!this._cipher || !this._cipher.isEncrypted(dataId)) return result.content;
+    return this._cipher.decrypt(dataId, group, result.content, result.encryptedDataKey);
+  }
+
   /**
    * Publish config via gRPC ConfigPublishRequest.
-   * encryptedDataKey (KMS-encrypted data key) travels as a ConfigPublishRequest additionMap entry.
    */
-  async publishSingle(dataId: string, group: string, tenant: string | undefined, content: string, type?: string, casMd5?: string, encryptedDataKey?: string): Promise<boolean> {
+  async publishSingle(dataId: string, group: string, tenant: string | undefined, content: string, type?: string, casMd5?: string): Promise<boolean> {
     const resolvedTenant = tenant != null ? tenant : this._namespace;
     this._logger.info('[GrpcConfigProxy] publishSingle dataId=%s group=%s tenant=%s', dataId, group, resolvedTenant);
     const request: any = {
@@ -161,14 +165,18 @@ export class GrpcConfigProxy extends Base {
       tenant: resolvedTenant,
       content,
     };
+    if (this._cipher && this._cipher.isEncrypted(dataId)) {
+      const encrypted = await this._cipher.encrypt(dataId, group, content);
+      request.content = encrypted.content;
+      if (encrypted.encryptedDataKey) {
+        request.additionMap = { encryptedDataKey: encrypted.encryptedDataKey };
+      }
+    }
     if (type) {
       request.type = type;
     }
     if (casMd5) {
       request.casMd5 = casMd5;
-    }
-    if (encryptedDataKey) {
-      request.additionMap = { encryptedDataKey };
     }
     const response = await this._transportClient.request(request, 'ConfigPublishRequest');
     return response.resultCode === 200;
