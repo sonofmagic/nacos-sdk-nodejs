@@ -114,6 +114,7 @@ export class HttpAgent {
     headers?: any;
     unit?: string;
     dataAsQueryString?: boolean;
+    /** Return response headers together with the decoded body. */
     withHeaders?: boolean;
   } = {}) {
     // 默认为当前单元
@@ -164,13 +165,13 @@ export class HttpAgent {
         });
         this.debug('%s %s, got %s, body: %j', method, url, res.status, res.data);
         switch (res.status) {
-          case HTTP_OK: {
-            const responseData = this.decodeRes
-              ? this.decodeRes(res, method, this.defaultEncoding)
-              : this.decodeResData(res, method);
-            // withHeaders 用于透出响应头（如 KMS 加密配置的 Encrypted-Data-Key），默认行为不变
-            return withHeaders ? { data: responseData, headers: res.headers } : responseData;
-          }
+          case HTTP_OK:
+            if (this.decodeRes) {
+              const decoded = this.decodeRes(res, method, this.defaultEncoding);
+              return withHeaders ? { content: decoded, headers: res.headers || {} } : decoded;
+            }
+            const content = this.decodeResData(res, method);
+            return withHeaders ? { content, headers: res.headers || {} } : content;
           case HTTP_NOT_FOUND:
             return null;
           case HTTP_CONFLICT:

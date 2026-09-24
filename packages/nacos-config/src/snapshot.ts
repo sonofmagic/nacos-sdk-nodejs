@@ -60,12 +60,10 @@ export class Snapshot extends Base implements ISnapshot {
 
   async save(key, value) {
     const filepath = this.getSnapshotFile(key);
-    // 对齐 Java SDK LocalConfigInfoProcessor.saveSnapshot：空内容视为删除，
-    // 避免服务端配置缺失或为空时残留过期快照，导致故障回退读到脏数据
-    if (!value) {
-      await this.delete(key);
-      return;
-    }
+    // Preserve the historical Snapshot API: an explicit empty value is still
+    // readable as an empty snapshot. Higher-level config reads remove stale
+    // snapshots when the server confirms an absent/empty configuration.
+    value = value || '';
     const dir = path.dirname(filepath);
     // 每次写用唯一临时文件名（pid + 递增序号 + 随机），避免同进程并发写同一 key 时复用同一
     // 临时文件：先完成 rename 的一方会让另一方 rename 到已不存在的文件而报 ENOENT
