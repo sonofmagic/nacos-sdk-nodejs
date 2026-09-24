@@ -14,6 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+import { KmsClient } from './cipher';
 // import { EventEmitter } from 'events';
 
 interface ListenFunc {
@@ -254,19 +256,13 @@ export interface IServerListManager {
 
 export interface ISnapshot {
   cacheDir;
-  get(key: string): any;
-  save(key: string, value: any);
-  delete(key: string);
-  batchSave(arr: Array<SnapShotData>);
-  /**
-   * 读取用户手工维护的容灾配置（failover），存在则优先于服务端与快照使用
-   * @return 内容，文件不存在返回 null
-   */
+  get(key: string): Promise<string | null>;
+  save(key: string, value: any): Promise<void>;
+  delete(key: string): Promise<void>;
+  batchSave(arr: Array<SnapShotData>): Promise<void>;
+  /** Read user-maintained disaster-recovery content, if present. */
   getFailover(key: string): Promise<string | null>;
-  /**
-   * 获取 failover 文件的最后修改时间（毫秒），用于探测文件变更
-   * @return mtime，文件不存在返回 null
-   */
+  /** Return the failover file mtime for change detection, if present. */
   getFailoverMtime(key: string): Promise<number | null>;
 }
 
@@ -319,8 +315,38 @@ export interface ClientOptions {
   aliyunCredentialsProvider?: any;
   /** Custom Alibaba Cloud extended credential provider */
   alibabaCloudCredentialsProvider?: any;
+  /** KMS Secrets Manager secret name used for automatic credential rotation */
+  alibabaCloudSecretName?: string;
+  /** Optional Secrets Manager client/provider for automatic rotation */
+  secretManagerClient?: any;
   /** Alibaba Cloud v4 signature region ID */
   signatureRegionId?: string;
+  /** Optional KMS adapter for MSE encrypted configurations */
+  kmsClient?: KmsClient;
+  /** Factory for ClientKey/DKMS adapters; receives the KMS options below */
+  kmsClientFactory?: (options: any) => KmsClient;
+  /** KMS public gateway endpoint */
+  kmsEndpoint?: string;
+  /** KMS region ID */
+  kmsRegionId?: string;
+  /** KMS customer master key ID */
+  kmsKeyId?: string;
+  /** Enable the in-memory KMS/DataKey cache (default: true) */
+  kmsCacheEnabled?: boolean;
+  /** Maximum number of KMS cache entries (default: 1000) */
+  kmsCacheMaxSize?: number;
+  /** KMS cache expiry after last access, in seconds */
+  kmsCacheAfterAccessSeconds?: number;
+  /** KMS cache expiry after write, in seconds */
+  kmsCacheAfterWriteSeconds?: number;
+  /** KMS ClientKey/DKMS adapter configuration */
+  kmsClientKeyContent?: string;
+  kmsClientKeyFilePath?: string;
+  kmsPassword?: string;
+  kmsCaFileContent?: string;
+  kmsCaFilePath?: string;
+  /** Whether the KMS adapter should use OpenSSL certificate validation */
+  openSSL?: boolean;
   /** HTTP request client, defaults to urllib */
   httpclient?: any;
   /** HTTP agent */
@@ -361,14 +387,6 @@ export interface ClientOptions {
   decodeRes?: (res: any, method?: string, encoding?: string) => any;
   /** Transport protocol: 'grpc' uses gRPC, 'http' uses HTTP long-polling (default: 'http') */
   transport?: 'grpc' | 'http';
-  /** Custom KMS client implementing generateDataKey/decrypt; overrides the built-in Alibaba Cloud client */
-  kmsClient?: any;
-  /** KMS OpenAPI endpoint, e.g. 'kms.cn-hangzhou.aliyuncs.com'; auto-resolved from kmsRegionId when omitted */
-  kmsEndpoint?: string;
-  /** KMS region id used to resolve the endpoint when kmsEndpoint is omitted */
-  kmsRegionId?: string;
-  /** KMS customer master key id used to generate data keys (default: 'alias/acs/mse') */
-  kmsKeyId?: string;
 }
 
 export enum ClientOptionKeys {
@@ -389,7 +407,18 @@ export enum ClientOptionKeys {
   TIME_TO_REFRESH_IN_MILLISECOND = 'timeToRefreshInMillisecond',
   ALIYUN_CREDENTIALS_PROVIDER = 'aliyunCredentialsProvider',
   ALIBABA_CLOUD_CREDENTIALS_PROVIDER = 'alibabaCloudCredentialsProvider',
+  ALIBABA_CLOUD_SECRET_NAME = 'alibabaCloudSecretName',
+  SECRET_MANAGER_CLIENT = 'secretManagerClient',
   SIGNATURE_REGION_ID = 'signatureRegionId',
+  KMS_CLIENT = 'kmsClient',
+  KMS_ENDPOINT = 'kmsEndpoint',
+  KMS_REGION_ID = 'kmsRegionId',
+  KMS_KEY_ID = 'kmsKeyId',
+  KMS_CACHE_ENABLED = 'kmsCacheEnabled',
+  KMS_CACHE_MAX_SIZE = 'kmsCacheMaxSize',
+  KMS_CACHE_AFTER_ACCESS_SECONDS = 'kmsCacheAfterAccessSeconds',
+  KMS_CACHE_AFTER_WRITE_SECONDS = 'kmsCacheAfterWriteSeconds',
+  CIPHER = 'cipher',
   HTTPCLIENT = 'httpclient',
   APPNAME = 'appName',
   SSL = 'ssl',
@@ -408,11 +437,7 @@ export enum ClientOptionKeys {
   IDENTITY_KEY = 'identityKey',
   IDENTITY_VALUE = 'identityValue',
   DECODE_RES = 'decodeRes',
-  ENDPOINT_QUERY_PARAMS = 'endpointQueryParams',
-  KMS_CLIENT = 'kmsClient',
-  KMS_ENDPOINT = 'kmsEndpoint',
-  KMS_REGION_ID = 'kmsRegionId',
-  KMS_KEY_ID = 'kmsKeyId'
+  ENDPOINT_QUERY_PARAMS = 'endpointQueryParams'
 }
 
 export interface IConfiguration {
